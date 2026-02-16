@@ -12,6 +12,8 @@ def render(
     price_usd: float, price_sgd: float | None,
     chg_24h: float | None, chg_7d: float | None,
     ath_usd: float | None,
+    eth_price_usd: float | None = None,
+    sol_price_usd: float | None = None,
     fng_value: int, fng_class: str,
     # News sections
     crypto_news: list[SignalItem],     # chains / digital asset news
@@ -23,19 +25,27 @@ def render(
     L = []
 
     # ── Header ──
-    L.append(f"**Crypto + FinTech Signal Intelligence — Daily Update**")
+    L.append(f"**Pocket Intelligence Daily Update**")
     L.append("")
     L.append(f"{date_str}")
     L.append("")
 
-    # ── Price bar ──
+    # ── Price bar (Bitcoin primary; ETH/SOL brief) ──
     ath_line = ""
     if ath_usd:
         pct_ath = (price_usd - ath_usd) / ath_usd * 100
         if pct_ath < -5:
             ath_line = f" | Down ~{abs(pct_ath):.0f}% from ATH of ${fmt_price(ath_usd)}"
-    L.append(f"**Price:** ${fmt_price(price_usd)} USD" + (f" / ${fmt_price(price_sgd)} SGD" if price_sgd else "") + ath_line)
+    L.append(f"**Bitcoin:** ${fmt_price(price_usd)} USD" + (f" / ${fmt_price(price_sgd)} SGD" if price_sgd else "") + ath_line)
     L.append(f"**Fear & Greed:** {fng_value} — {fng_class.upper()} | **24h:** {fmt_pct(chg_24h)} | **7d:** {fmt_pct(chg_7d)}")
+    if eth_price_usd is not None or sol_price_usd is not None:
+        parts = []
+        if eth_price_usd is not None:
+            parts.append(f"**Ethereum:** ${fmt_price(eth_price_usd)}")
+        if sol_price_usd is not None:
+            parts.append(f"**Solana:** ${fmt_price(sol_price_usd)}")
+        if parts:
+            L.append(" | ".join(parts))
     L.append("")
     L.append("---")
     L.append("")
@@ -50,7 +60,9 @@ def render(
             # Truncate body to ~200 chars for readability
             if body_text and len(body_text) > 200:
                 body_text = body_text[:197].rsplit(" ", 1)[0] + "..."
-            if body_text and body_text != headline:
+            if s.source == "fred":
+                L.append(f"• {headline}. Source: FRED")
+            elif body_text and body_text != headline:
                 L.append(f"• {headline}")
                 L.append(f"  {body_text}")
                 if s.url:
@@ -77,6 +89,7 @@ def render(
             price_str = f"${m['price']:,.2f}" if m.get("price") else "N/A"
             movers_line.append(f"**{sym}** {price_str} ({arrow} {abs(chg):.1f}%)")
         L.append(" | ".join(movers_line))
+        L.append("*Watchlist from config.*")
         L.append("")
     if fintech_news:
         for s in fintech_news[:5]:

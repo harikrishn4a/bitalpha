@@ -23,6 +23,7 @@ from data_sources.newsapi import NewsAPISource
 from data_sources.gdelt import GDELTSource
 from data_sources.x_trends import XTrendsSource
 from data_sources.finnhub import FinnhubSource
+from data_sources.rss_news import RssNewsSource
 from signal_engine.normalize import normalize_raw, SignalItem
 from signal_engine.dedupe import dedupe
 from signal_engine.scoring import score_batch
@@ -95,17 +96,43 @@ def _news_filter_keywords() -> list[str]:
     return list(kw.get("crypto", [])) + list(kw.get("fintech", []))
 
 
+def _apply_news_cap(raw: list[dict], cap: int | None = None) -> list[dict]:
+    """Limit NewsAPI/GDELT items per run so curated RSS is preferred."""
+    if cap is None or cap < 1:
+        return raw
+    out = []
+    n_newsapi = 0
+    n_gdelt = 0
+    for item in raw:
+        src = item.get("source", "")
+        if src == "newsapi":
+            n_newsapi += 1
+            if n_newsapi > cap:
+                continue
+        elif src == "gdelt":
+            n_gdelt += 1
+            if n_gdelt > cap:
+                continue
+        out.append(item)
+    return out
+
+
 def _collect_all_sources() -> list[dict]:
     """Fetch from all configured sources. Returns raw signal dicts."""
     raw = []
     filter_kw = _news_filter_keywords()
+    feeds = CFG.get("news_rss_feeds", [])
+    if feeds:
+        try:
+            raw.extend(RssNewsSource(cache, feeds).fetch_signals())
+        except Exception as e:
+            print(f"[WARN] rss_news failed: {e}", file=sys.stderr)
     sources = [
         FredSource(cache),
         CoinGeckoSource(cache),
         CoinMarketCalSource(cache),
         FinnhubSource(cache),
     ]
-    # News source toggle; filter so only crypto/fintech-relevant articles pass
     ns = CFG.get("news_source", "newsapi")
     if ns == "newsapi":
         sources.append(NewsAPISource(cache, filter_keywords=filter_kw))
@@ -118,12 +145,19 @@ def _collect_all_sources() -> list[dict]:
             raw.extend(src.fetch_signals())
         except Exception as e:
             print(f"[WARN] {src.name} failed: {e}", file=sys.stderr)
-    return raw
+    cap = CFG.get("news_headline_cap_per_source", 3)
+    return _apply_news_cap(raw, cap)
 
 
 def _collect_fast_sources() -> list[dict]:
     """Fetch fast-updating sources for hourly news brief."""
     raw = []
+    feeds = CFG.get("news_rss_feeds", [])
+    if feeds:
+        try:
+            raw.extend(RssNewsSource(cache, feeds).fetch_signals())
+        except Exception as e:
+            print(f"[WARN] rss_news failed: {e}", file=sys.stderr)
     filter_kw = _news_filter_keywords()
     ns = CFG.get("news_source", "newsapi")
     news_src = NewsAPISource(cache, filter_keywords=filter_kw) if ns == "newsapi" else GDELTSource(cache, filter_keywords=filter_kw)
@@ -132,7 +166,8 @@ def _collect_fast_sources() -> list[dict]:
             raw.extend(src.fetch_signals())
         except Exception as e:
             print(f"[WARN] {src.name} failed: {e}", file=sys.stderr)
-    return raw
+    cap = CFG.get("news_headline_cap_per_source", 3)
+    return _apply_news_cap(raw, cap)
 
 
 def _pipeline(raw: list[dict]) -> list[SignalItem]:
@@ -234,38 +269,57 @@ def run_weekly_update(print_only: bool = False):
     )
     db.save_regime(now.strftime("%Y-%m-%d"), current_regime, drivers, delta)
 
-    # Catalysts
+    # Catalysts (FRED / CoinMarketCal)
     catalysts = [i for i in items if i.category in ("macro", "crypto_catalyst") and i.source in ("fred", "coinmarketcal")]
 
-    # Fintech: separate quotes (movers) from news (catalysts)
-    fintech_quote_items = [
-        i for i in items
-        if i.category == "fintech" and i.raw_data.get("is_quote")
-    ]
-    fintech_news_items = [
-        i for i in items
-        if i.category == "fintech" and not i.raw_data.get("is_quote")
-    ]
+    # Policy & regulation: news/signals mentioning regulation, SEC, MAS, lawsuit, court, policy, etc.
+    _policy_kw = (
+        "regulation", "regulatory", "sec", "mas", "lawsuit", "court", "ruling", "verdict", "trial",
+        "policy", "legislation", "congress", "senate", "fca", "cfdc", "trump", "crypto law", "crypto policy",
+        "hearing", "enforcement", "settlement", "fine", "approval", "etf", "cbdc",
+    )
+    def _matches_policy(s: SignalItem) -> bool:
+        t = ((s.headline or "") + " " + (s.body or "")).lower()
+        return any(k in t for k in _policy_kw)
+    policy_regulation = [i for i in items if i.category in ("crypto_catalyst", "macro") and _matches_policy(i)]
+    policy_regulation.sort(key=lambda s: s.signal_score, reverse=True)
 
-    # Build movers list sorted by absolute % change
-    fintech_movers = []
-    for fq in fintech_quote_items:
-        sym = fq.raw_data.get("symbol", "")
-        chg = fq.raw_data.get("dp", 0) or 0
-        price_val = fq.raw_data.get("c", 0) or 0
-        # Find a news catalyst for this symbol, if any
-        catalyst = None
-        for fn in fintech_news_items:
-            if fn.raw_data.get("symbol") == sym:
-                catalyst = fn.headline.replace(f"[{sym}] ", "")
-                break
-        fintech_movers.append({
-            "symbol": sym,
-            "price": price_val,
-            "chg_pct": chg,
-            "catalyst": catalyst,
-        })
-    fintech_movers.sort(key=lambda x: abs(x["chg_pct"]), reverse=True)
+    # Analyst & leading voices: X trends (leading voices) + news with analyst/bank predictions
+    _analyst_kw = (
+        "analyst", "prediction", "price target", "forecast", "jpm", "goldman", "morgan stanley",
+        "bernstein", "bank of america", "citigroup", "moody", "standard chartered", "btc price",
+    )
+    def _matches_analyst(s: SignalItem) -> bool:
+        t = ((s.headline or "") + " " + (s.body or "")).lower()
+        return any(k in t for k in _analyst_kw)
+    _news_like = ("newsapi", "gdelt")  # plus RSS use feed name (coindesk, etc.)
+    analyst_from_news = [
+        i for i in items
+        if (i.source in _news_like or (i.source and i.source not in ("fred", "coingecko", "finnhub", "coinmarketcal", "x_trends")))
+        and _matches_analyst(i)
+    ]
+    analyst_from_x = [i for i in items if i.source == "x_trends"]
+    analyst_voices = analyst_from_x + analyst_from_news
+    analyst_voices.sort(
+        key=lambda s: (s.raw_data or {}).get("engagement", 0) if s.source == "x_trends" else s.signal_score,
+        reverse=True,
+    )
+    analyst_voices = analyst_voices[:8]
+
+    # Key events (beyond FRED): meetings, hearings, rulings, conferences, FOMC, CPI, NFP, etc.
+    _event_kw = (
+        "fomc", "cpi", "nfp", "payroll", "earnings", "summit", "conference", "meeting",
+        "hearing", "ruling", "judgement", "verdict", "trial date", "press conference",
+        "cabinet", "trump", "mas ", "singapore", "announcement",
+    )
+    def _matches_key_event(s: SignalItem) -> bool:
+        if s.source == "fred":
+            return False
+        t = ((s.headline or "") + " " + (s.body or "")).lower()
+        return any(k in t for k in _event_kw)
+    key_events = [i for i in items if _matches_key_event(i) and i not in catalysts]
+    key_events.sort(key=lambda s: s.signal_score, reverse=True)
+    key_events = key_events[:8]
 
     # Global crypto market data (dominance, volume)
     try:
@@ -299,27 +353,31 @@ def run_weekly_update(print_only: bool = False):
     scenario_bull = f"If macro eases (yields drop, USD softens) → BTC pushes toward R1 ({levels.get('R1', 0):,.0f}). Catalyst: dovish FOMC or cool CPI."
     scenario_bear = f"If macro tightens (yields spike, USD rallies) → BTC tests S1 ({levels.get('S1', 0):,.0f}). Risk: hot inflation print or hawkish surprise."
 
-    # Learn
-    w = now.isocalendar()[1]
-    learn = _LEARN[(w - 1) % len(_LEARN)]
     text = weekly_renderer.render(
         date_str=date_str,
         digest=digest,
         catalysts=catalysts,
-        price_usd=price, price_sgd=mdata.get("price_sgd"),
-        chg_7d=mdata.get("chg_7d"), chg_ytd=mdata.get("chg_ytd"),
+        key_events=key_events,
+        price_usd=price,
+        price_sgd=mdata.get("price_sgd"),
+        chg_7d=mdata.get("chg_7d"),
+        chg_ytd=mdata.get("chg_ytd"),
         ath_usd=mdata.get("ath_usd"),
-        fng_value=fng_val, fng_class=fng_cls, fng_30d_range=fng_rng,
-        levels=levels, regime=current_regime, hist_context=hist,
-        scenario_base=scenario_base, scenario_bull=scenario_bull, scenario_bear=scenario_bear,
-        fintech_movers=fintech_movers,
-        fintech_news=fintech_news_items,
-        exchange_signals=[i for i in items if "exchange" in i.headline.lower()],
+        fng_value=fng_val,
+        fng_class=fng_cls,
+        fng_30d_range=fng_rng,
+        levels=levels,
+        regime=current_regime,
+        hist_context=hist,
+        scenario_base=scenario_base,
+        scenario_bull=scenario_bull,
+        scenario_bear=scenario_bear,
         macro_dashboard=macro_dash,
         macro_translation=macro_trans,
         macro_delta=delta,
         regime_drivers=drivers,
-        learn_title=learn[0], learn_body=learn[1], learn_misconception=learn[2],
+        policy_regulation=policy_regulation,
+        analyst_voices=analyst_voices,
     )
 
     # Chart
@@ -348,9 +406,20 @@ def run_daily_update(print_only: bool = False):
     mdata = _get_market_data()
     fng_val, fng_cls, _ = _get_fng()
     price = mdata.get("price_usd", 0) or 0
+    eth_price_usd = sol_price_usd = None
+    try:
+        cg = CoinGeckoSource(cache)
+        alt = cg.simple_price(ids="ethereum,solana", vs="usd")
+        if isinstance(alt, dict):
+            eth_price_usd = alt.get("ethereum", {}).get("usd")
+            sol_price_usd = alt.get("solana", {}).get("usd")
+    except Exception:
+        pass
 
-    # Separate signals by category
+    # Separate signals by category; take by importance (signal score)
     crypto_news = [i for i in items if i.category in ("crypto_catalyst", "macro")]
+    crypto_news.sort(key=lambda s: s.signal_score, reverse=True)
+    crypto_news = crypto_news[:6]
     fintech_signals = [i for i in items if i.category == "fintech"]
     social_signals = [i for i in items if i.category == "social"]
 
@@ -382,6 +451,8 @@ def run_daily_update(print_only: bool = False):
         price_sgd=mdata.get("price_sgd"),
         chg_24h=mdata.get("chg_24h"), chg_7d=mdata.get("chg_7d"),
         ath_usd=mdata.get("ath_usd"),
+        eth_price_usd=eth_price_usd,
+        sol_price_usd=sol_price_usd,
         fng_value=fng_val, fng_class=fng_cls,
         crypto_news=crypto_news[:6],
         fintech_news=fintech_news[:5],
@@ -413,9 +484,10 @@ def run_hourly_scan(print_only: bool = False):
             continue  # CoinGecko price snapshots
         news_items.append(i)
 
+    # Sort by importance (signal score only)
     news_items.sort(key=lambda s: s.signal_score, reverse=True)
 
-    # Take top 3-5 items
+    # Take top 5 most important
     top = news_items[:5]
     if not top:
         return  # Nothing worth sending

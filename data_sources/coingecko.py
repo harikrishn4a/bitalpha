@@ -26,8 +26,8 @@ class CoinGeckoSource(BaseSource):
 
     # ── Price endpoints ──
 
-    def simple_price(self, vs: str = "usd,sgd") -> dict:
-        return self._get(f"{_CG_BASE}/simple/price", {"ids": "bitcoin", "vs_currencies": vs}, cache_prefix="cg")
+    def simple_price(self, ids: str = "bitcoin", vs: str = "usd,sgd") -> dict:
+        return self._get(f"{_CG_BASE}/simple/price", {"ids": ids, "vs_currencies": vs}, cache_prefix="cg")
 
     def coin_detail(self) -> dict:
         return self._get(f"{_CG_BASE}/coins/bitcoin", {

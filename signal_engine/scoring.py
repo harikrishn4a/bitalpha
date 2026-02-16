@@ -11,6 +11,7 @@ _CREDIBILITY = {
     "coingecko": 25,
     "coinmarketcal": 18,
     "finnhub": 22,
+    "rss_news": 22,
     "newsapi": 15,
     "gdelt": 12,
     "x_trends": 8,

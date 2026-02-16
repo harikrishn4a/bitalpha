@@ -3,6 +3,37 @@
 # News source: "newsapi" or "gdelt"
 news_source: newsapi
 
+# Curated RSS feeds (crypto/fintech outlets) — used in addition to news_source
+news_rss_feeds:
+  - name: coindesk
+    url: https://www.coindesk.com/arc/outboundfeeds/rss/
+    weight: 5
+  - name: cointelegraph
+    url: https://cointelegraph.com/rss
+    weight: 5
+  - name: decrypt
+    url: https://decrypt.co/feed
+    weight: 4
+  - name: yahoo_finance_top
+    url: https://finance.yahoo.com/rss/topstories
+    weight: 3
+  - name: the_block
+    url: https://www.theblock.co/rss.xml
+    weight: 5
+
+# Source weights for prioritization (higher = prefer when selecting top items)
+source_weights:
+  rss_news: 5
+  coinmarketcal: 4
+  fred: 4
+  finnhub: 3
+  x_trends: 3
+  newsapi: 1
+  gdelt: 1
+
+# Max NewsAPI/GDELT items per run (curated RSS preferred)
+news_headline_cap_per_source: 3
+
 # Schedule (cron-style, SGT)
 schedule:
   weekly: "0 8 * * 0"      # Sunday 8 AM
