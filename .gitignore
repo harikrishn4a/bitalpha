@@ -1,18 +1,27 @@
-node_modules/
-*.log
-openclaw.json
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-*.egg-info/
-
 # Secrets
 .env
 *.env
 
-# Caches and output
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Cache / output
 .cache/
 out/
 *.png
+
+# SQLite
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
