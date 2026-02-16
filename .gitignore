@@ -1,0 +1,18 @@
+node_modules/
+*.log
+openclaw.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Secrets
+.env
+*.env
+
+# Caches and output
+.cache/
+out/
+*.png
